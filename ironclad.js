@@ -40,9 +40,31 @@ const DAY_LABELS = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
 const HOURS = CONFIG.END_HOUR - CONFIG.START_HOUR;
 const SNAP_Y = CONFIG.HOUR_HEIGHT / 4; // 15-minute grid
 
-// Task label fragments — combined randomly for realistic text
+// Task label fragments — verbose on purpose, text is dead weight we measure
 const LABEL_VERBS = ['Review', 'Update', 'Fix', 'Deploy', 'Test', 'Write', 'Plan', 'Design', 'Debug', 'Refactor'];
 const LABEL_NOUNS = ['API docs', 'homepage', 'auth flow', 'dashboard', 'CI pipeline', 'database', 'UI tests', 'sprint plan', 'onboarding', 'backlog'];
+const LABEL_REASONS = [
+    'Needs sign-off from stakeholders before EOD Friday',
+    'Blocked until the upstream API migration completes',
+    'Critical path item for the Q3 release milestone',
+    'Compliance requirement from the latest security audit',
+    'Technical debt accumulated over the last three sprints',
+    'Dependency on the shared component library upgrade',
+    'Performance regression flagged in last week\'s report',
+    'Requested by product owner during sprint planning',
+];
+const LABEL_BULLETS = [
+    'Verify all edge cases against the test matrix',
+    'Update the integration tests for new endpoints',
+    'Cross-reference with the ServiceNow ticket backlog',
+    'Coordinate with DevOps on the deployment window',
+    'Document any breaking changes in the changelog',
+    'Run load tests against staging before merge',
+    'Get peer review from at least two team members',
+    'Sync with the design system token updates',
+    'Check backwards compatibility with legacy clients',
+    'Validate against the accessibility requirements',
+];
 
 // Entity type colors: [fill, stroke]
 const TYPE_COLORS = [
@@ -358,20 +380,43 @@ class IroncladEngine {
             ctx.strokeRect(this.xs[i], ey, this.ws[i], this.hs[i]);
         }
 
-        // Text pass — separate loop so we set font/style once
-        // fillText with maxWidth param handles truncation without clipping
-        ctx.font = '11px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif';
+        // Text pass — separate loop, font set once
+        // Each entity has [title, bullet, bullet, bullet, bullet]
+        // Lines rendered based on available height (~15px per line)
+        const LINE_H = 14;
+        const TEXT_PAD = 6;
+        ctx.font = '600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif';
         ctx.textBaseline = 'top';
-        ctx.fillStyle = '#ccc';
 
         for (let i = 0; i < this.count; i++) {
             const ey = this.ys[i];
             const eh = this.hs[i];
             if (ey > lh || ey + eh < 0) continue;
-            if (eh < 22) continue; // too short to fit text
+            if (eh < 20) continue;
 
-            const maxW = this.ws[i] - 12;
-            ctx.fillText(this.labels[i], this.xs[i] + 6, ey + 5, maxW);
+            const ex = this.xs[i];
+            const maxW = this.ws[i] - TEXT_PAD * 2;
+            const lines = this.labels[i];
+            let ty = ey + 4;
+
+            // Title (bold weight already set)
+            ctx.fillStyle = '#ddd';
+            ctx.fillText(lines[0], ex + TEXT_PAD, ty, maxW);
+            ty += LINE_H;
+
+            // Bullets — dimmer, normal weight
+            if (ty + LINE_H > ey + eh) continue;
+            ctx.font = '10px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif';
+            ctx.fillStyle = '#888';
+
+            for (let l = 1; l < 5; l++) {
+                if (ty + LINE_H > ey + eh) break;
+                ctx.fillText('- ' + lines[l], ex + TEXT_PAD, ty, maxW);
+                ty += LINE_H;
+            }
+
+            // Reset bold for next entity's title
+            ctx.font = '600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif';
         }
 
         ctx.restore();
@@ -491,8 +536,17 @@ class IroncladEngine {
             this.ws[i]    = dw - pad * 2;
             this.hs[i]    = dur * hh;
             this.types[i] = (Math.random() * 3) | 0;
-            this.labels[i] = LABEL_VERBS[(Math.random() * LABEL_VERBS.length) | 0]
-                     + ' ' + LABEL_NOUNS[(Math.random() * LABEL_NOUNS.length) | 0];
+
+            const verb = LABEL_VERBS[(Math.random() * LABEL_VERBS.length) | 0];
+            const noun = LABEL_NOUNS[(Math.random() * LABEL_NOUNS.length) | 0];
+            const reason = LABEL_REASONS[(Math.random() * LABEL_REASONS.length) | 0];
+            this.labels[i] = [
+                verb + ' ' + noun + ': ' + reason,
+                LABEL_BULLETS[(Math.random() * LABEL_BULLETS.length) | 0],
+                LABEL_BULLETS[(Math.random() * LABEL_BULLETS.length) | 0],
+                LABEL_BULLETS[(Math.random() * LABEL_BULLETS.length) | 0],
+                LABEL_BULLETS[(Math.random() * LABEL_BULLETS.length) | 0],
+            ];
         }
 
         this.count = count;
