@@ -40,6 +40,10 @@ const DAY_LABELS = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
 const HOURS = CONFIG.END_HOUR - CONFIG.START_HOUR;
 const SNAP_Y = CONFIG.HOUR_HEIGHT / 4; // 15-minute grid
 
+// Task label fragments — combined randomly for realistic text
+const LABEL_VERBS = ['Review', 'Update', 'Fix', 'Deploy', 'Test', 'Write', 'Plan', 'Design', 'Debug', 'Refactor'];
+const LABEL_NOUNS = ['API docs', 'homepage', 'auth flow', 'dashboard', 'CI pipeline', 'database', 'UI tests', 'sprint plan', 'onboarding', 'backlog'];
+
 // Entity type colors: [fill, stroke]
 const TYPE_COLORS = [
     ['#1e3a5f', '#3a7bd5'], // Task — blue
@@ -65,6 +69,7 @@ class IroncladEngine {
         this.ws    = new Float32Array(CONFIG.MAX_ENTITIES);
         this.hs    = new Float32Array(CONFIG.MAX_ENTITIES);
         this.types = new Uint8Array(CONFIG.MAX_ENTITIES);
+        this.labels = new Array(CONFIG.MAX_ENTITIES); // strings can't live in typed arrays
 
         // ── Spatial index: array-of-arrays, reused via length reset ──
         this.buckets = new Array(CONFIG.MAX_BUCKETS);
@@ -341,7 +346,7 @@ class IroncladEngine {
         }
         ctx.stroke();
 
-        // Entities — single pass, type-colored
+        // Entities — rects first, then text (fewer fillStyle flips)
         for (let i = 0; i < this.count; i++) {
             const ey = this.ys[i];
             if (ey > lh || ey + this.hs[i] < 0) continue;
@@ -351,6 +356,22 @@ class IroncladEngine {
             ctx.fillRect(this.xs[i], ey, this.ws[i], this.hs[i]);
             ctx.strokeStyle = TYPE_COLORS[t][1];
             ctx.strokeRect(this.xs[i], ey, this.ws[i], this.hs[i]);
+        }
+
+        // Text pass — separate loop so we set font/style once
+        // fillText with maxWidth param handles truncation without clipping
+        ctx.font = '11px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif';
+        ctx.textBaseline = 'top';
+        ctx.fillStyle = '#ccc';
+
+        for (let i = 0; i < this.count; i++) {
+            const ey = this.ys[i];
+            const eh = this.hs[i];
+            if (ey > lh || ey + eh < 0) continue;
+            if (eh < 22) continue; // too short to fit text
+
+            const maxW = this.ws[i] - 12;
+            ctx.fillText(this.labels[i], this.xs[i] + 6, ey + 5, maxW);
         }
 
         ctx.restore();
@@ -470,6 +491,8 @@ class IroncladEngine {
             this.ws[i]    = dw - pad * 2;
             this.hs[i]    = dur * hh;
             this.types[i] = (Math.random() * 3) | 0;
+            this.labels[i] = LABEL_VERBS[(Math.random() * LABEL_VERBS.length) | 0]
+                     + ' ' + LABEL_NOUNS[(Math.random() * LABEL_NOUNS.length) | 0];
         }
 
         this.count = count;

@@ -36,6 +36,30 @@ Open `http://localhost:3000` (serve) or `:8080` (python) in a browser.
 | Drag latency | <16ms |
 | 2000 entities | No stutters |
 
+## Validation results (v0.5)
+
+Tested 2025-02-07 on local machine and enterprise CloudPC (VDI, software-rendered).
+
+**Local machine:** Rock solid 60fps across all entity counts and settings.
+
+**CloudPC (VDI):**
+
+| Scenario | FPS | Feel |
+|----------|-----|------|
+| Idle (any count) | 32 (VDI cap) | Solid |
+| 500 entities, 150px radius | 32 | Solid |
+| 2000 entities, 150px radius | 32 | Solid |
+| 5000 entities, 150px radius | 32 | Solid |
+| 5000 entities, 500px radius (~2500 candidates) | 14 | Noticeable lag |
+
+**Conclusions:**
+- The canvas/DOM hybrid approach **passes validation** on CloudPC
+- 32fps is the VDI display ceiling — we hit it in all realistic scenarios
+- ~10x headroom over real-world usage (500 entities smooth vs 50-100 expected)
+- Only bottleneck: insertion sort at extreme candidate counts (2500+). Fix is trivial (cap scan at pool size) but unnecessary at real scale
+
+**Verdict: Architecture holds. No pivot needed.**
+
 ## Architecture
 
 Plain JS. No TypeScript compilation needed for validation. Will be typed after perf validation passes.
