@@ -1,11 +1,11 @@
 /**
- * IRONCLAD ENGINE v0.5 — Validation Build
+ * IRONCLAD ENGINE v0.5.2 — Validation Build
  *
  * Canvas/DOM hybrid renderer for time tracking on software-rendered CloudPCs.
  * No dependencies. No build step.
  *
- * v0.5.1: 24h scrollable day, canvas is full-height pre-rendered texture.
- *         Scrolling is free — browser composites from the existing buffer.
+ * Canvas is viewport-sized, re-renders the visible slice on scroll.
+ * Y-culling ensures we only draw what's on screen.
  */
 
 // ─── Config ─────────────────────────────────────────────────────────────────
@@ -35,7 +35,7 @@ const HOURS = CONFIG.END_HOUR - CONFIG.START_HOUR; // 24
 const SNAP_Y = CONFIG.HOUR_HEIGHT / 4; // 15-minute grid
 const CONTENT_HEIGHT = CONFIG.TOP_HEADER + HOURS * CONFIG.HOUR_HEIGHT; // 1472px
 
-// Task label fragments — verbose on purpose, text is dead weight we measure
+// Task label fragments
 const LABEL_VERBS = ['Review', 'Update', 'Fix', 'Deploy', 'Test', 'Write', 'Plan', 'Design', 'Debug', 'Refactor'];
 const LABEL_NOUNS = ['API docs', 'homepage', 'auth flow', 'dashboard', 'CI pipeline', 'database', 'UI tests', 'sprint plan', 'onboarding', 'backlog'];
 const LABEL_REASONS = [
@@ -79,8 +79,7 @@ class IroncladEngine {
         this.container.style.overflowY = 'scroll';
         this.container.style.overflowX = 'hidden';
 
-        // Spacer div — creates the scrollable height.
-        // Canvas is absolute (doesn't contribute to flow), so we need this.
+        // Spacer — in normal flow, creates the scrollable height.
         this.spacer = document.createElement('div');
         this.spacer.style.cssText = `height:${CONTENT_HEIGHT}px;pointer-events:none;`;
         this.container.appendChild(this.spacer);
@@ -95,15 +94,15 @@ class IroncladEngine {
         this.types = new Uint8Array(CONFIG.MAX_ENTITIES);
         this.labels = new Array(CONFIG.MAX_ENTITIES);
 
-        // ── Spatial index: array-of-arrays, reused via length reset ──
+        // ── Spatial index ──
         this.buckets = new Array(CONFIG.MAX_BUCKETS);
         for (let i = 0; i < CONFIG.MAX_BUCKETS; i++) this.buckets[i] = [];
 
-        // ── Frame-stamp dedup (entities spanning multiple buckets) ──
+        // ── Frame-stamp dedup ──
         this.frameStamp = new Uint32Array(CONFIG.MAX_ENTITIES);
         this.currentFrame = 0;
 
-        // ── Pre-allocated candidate buffers (zero alloc in hot path) ──
+        // ── Pre-allocated candidate buffers ──
         this.candidateIdx  = new Int32Array(CONFIG.MAX_ENTITIES);
         this.candidateDist = new Float64Array(CONFIG.MAX_ENTITIES);
         this.candidateCount = 0;
@@ -111,20 +110,23 @@ class IroncladEngine {
         // ── DOM pool ──
         this.pool = [];
 
-        // ── Canvas — full content height, pre-rendered texture ──
+        // ── Canvas — viewport-sized, re-renders visible slice on scroll ──
         this.dpr = window.devicePixelRatio || 1;
         this.canvas = document.createElement('canvas');
-        this.canvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;';
+        this.canvas.style.cssText =
+            'position:absolute;top:0;left:0;pointer-events:none;will-change:transform;';
         this.container.appendChild(this.canvas);
         this.ctx = this.canvas.getContext('2d', { alpha: false });
         if (!this.ctx) throw new Error('Canvas 2D unavailable');
 
+        // ── Scroll state ──
+        this.scrollY = 0;
+
         // ── Input state ──
-        // mouseX/mouseY are in CONTENT space (scroll-adjusted)
-        // _lastVY is viewport-relative Y, for recalculating on scroll
+        // mouseX/mouseY are CONTENT-space (scroll-adjusted)
         this.mouseX = -9999;
         this.mouseY = -9999;
-        this._lastVY = -9999;
+        this._lastVY = -9999; // viewport-relative Y, for scroll recalc
         this.prevMX = -9999;
         this.prevMY = -9999;
         this.dirty = true;
@@ -142,7 +144,7 @@ class IroncladEngine {
         this.prevTime = 0;
         this.stats = { fps: 0, frameTime: 0, candidates: 0, dragLatency: 0 };
 
-        // ── Stats panel — on body, not in scroll container ──
+        // ── Stats panel (on body, not in scroll container) ──
         this._buildStatsPanel();
 
         // ── Init ──
@@ -150,15 +152,11 @@ class IroncladEngine {
         this._bindInput();
         this._resize();
 
-        // Arrow function — bound once, reused every frame
         this._raf = (now) => {
             this._tick(now);
             requestAnimationFrame(this._raf);
         };
 
-        if (typeof ResizeObserver !== 'undefined') {
-            new ResizeObserver(() => this._resize()).observe(this.container);
-        }
         window.addEventListener('resize', () => this._resize());
     }
 
@@ -168,8 +166,7 @@ class IroncladEngine {
         this._generate(n);
         this.prevTime = performance.now();
         requestAnimationFrame(this._raf);
-
-        // Scroll to 8am on launch
+        // Scroll to 8am
         this.container.scrollTop = 8 * CONFIG.HOUR_HEIGHT;
     }
 
@@ -201,7 +198,6 @@ class IroncladEngine {
 
     _rebuildIndex() {
         for (let b = 0; b < CONFIG.MAX_BUCKETS; b++) this.buckets[b].length = 0;
-
         for (let i = 0; i < this.count; i++) {
             const b0 = (this.xs[i] / CONFIG.BUCKET_WIDTH) | 0;
             const b1 = ((this.xs[i] + this.ws[i]) / CONFIG.BUCKET_WIDTH) | 0;
@@ -305,52 +301,64 @@ class IroncladEngine {
     }
 
     // ── Canvas render ───────────────────────────────────────────────────
-    // Full 24h pre-rendered. Scrolling is free — browser just composites
-    // a different viewport offset of the existing canvas buffer.
+    // Viewport-sized canvas. Renders only the visible slice of 24h.
+    // On scroll, the canvas translateY keeps it in the viewport,
+    // and we re-render the visible portion offset by scrollY.
 
     _render() {
         const W = this.canvas.width;
         const H = this.canvas.height;
         const ctx = this.ctx;
         const dpr = this.dpr;
+        const sy = this.scrollY;
 
         ctx.fillStyle = '#0e0e12';
         ctx.fillRect(0, 0, W, H);
         ctx.save();
         ctx.scale(dpr, dpr);
 
-        const lw = W / dpr;
-        const lh = H / dpr;
+        const vpW = W / dpr;
+        const vpH = H / dpr;
         const gx = CONFIG.LEFT_GUTTER;
-        const gy = CONFIG.TOP_HEADER;
+        const gy = CONFIG.TOP_HEADER - sy; // grid origin offset by scroll
         const dw = CONFIG.DAY_WIDTH;
         const hh = CONFIG.HOUR_HEIGHT;
         const gridR = gx + CONFIG.DAYS * dw;
-        const gridB = gy + HOURS * hh;
 
-        // Day headers
-        ctx.fillStyle = '#999';
-        ctx.font = '600 11px monospace';
-        ctx.textAlign = 'center';
-        for (let d = 0; d < CONFIG.DAYS; d++) {
-            ctx.fillText(DAY_LABELS[d], gx + d * dw + dw * 0.5, gy - 10);
+        // Day headers — only when scrolled near the top
+        if (gy > -20) {
+            ctx.fillStyle = '#999';
+            ctx.font = '600 11px monospace';
+            ctx.textAlign = 'center';
+            for (let d = 0; d < CONFIG.DAYS; d++) {
+                ctx.fillText(DAY_LABELS[d], gx + d * dw + dw * 0.5, gy - 10);
+            }
         }
 
-        // Hour labels
-        ctx.fillStyle = '#555';
+        // Hour labels + grid lines — only visible ones
         ctx.font = '10px monospace';
         ctx.textAlign = 'right';
+
+        ctx.beginPath();
         for (let h = 0; h <= HOURS; h++) {
+            const y = gy + h * hh;
+            if (y > vpH + hh) break;
+            if (y < -hh) continue;
+
+            // Hour label
+            ctx.fillStyle = '#555';
             const label = String(CONFIG.START_HOUR + h).padStart(2, '0') + ':00';
-            ctx.fillText(label, gx - 8, gy + h * hh + 4);
+            ctx.fillText(label, gx - 8, y + 4);
         }
 
-        // Hour grid lines
+        // Hour lines
         ctx.strokeStyle = '#252530';
         ctx.lineWidth = 1;
         ctx.beginPath();
         for (let h = 0; h <= HOURS; h++) {
             const y = gy + h * hh + 0.5;
+            if (y > vpH + 1) break;
+            if (y < -1) continue;
             ctx.moveTo(gx, y);
             ctx.lineTo(gridR, y);
         }
@@ -362,26 +370,32 @@ class IroncladEngine {
         for (let h = 0; h < HOURS; h++) {
             for (let q = 1; q < 4; q++) {
                 const y = gy + h * hh + q * SNAP_Y + 0.5;
+                if (y > vpH + 1) break;
+                if (y < -1) continue;
                 ctx.moveTo(gx, y);
                 ctx.lineTo(gridR, y);
             }
         }
         ctx.stroke();
 
-        // Day dividers
-        ctx.strokeStyle = '#252530';
-        ctx.beginPath();
-        for (let d = 0; d <= CONFIG.DAYS; d++) {
-            const x = gx + d * dw + 0.5;
-            ctx.moveTo(x, gy);
-            ctx.lineTo(x, gridB);
+        // Day dividers — full viewport height
+        const gridTop = Math.max(0, gy);
+        const gridBot = Math.min(vpH, gy + HOURS * hh);
+        if (gridBot > gridTop) {
+            ctx.strokeStyle = '#252530';
+            ctx.beginPath();
+            for (let d = 0; d <= CONFIG.DAYS; d++) {
+                const x = gx + d * dw + 0.5;
+                ctx.moveTo(x, gridTop);
+                ctx.lineTo(x, gridBot);
+            }
+            ctx.stroke();
         }
-        ctx.stroke();
 
-        // Entities — rects first, then text (fewer fillStyle flips)
+        // Entities — Y-culled against viewport
         for (let i = 0; i < this.count; i++) {
-            const ey = this.ys[i];
-            if (ey > lh || ey + this.hs[i] < 0) continue;
+            const ey = this.ys[i] - sy;
+            if (ey > vpH || ey + this.hs[i] < 0) continue;
 
             const t = this.types[i];
             ctx.fillStyle = TYPE_COLORS[t][0];
@@ -390,16 +404,16 @@ class IroncladEngine {
             ctx.strokeRect(this.xs[i], ey, this.ws[i], this.hs[i]);
         }
 
-        // Text pass — separate loop, font set once
+        // Text pass
         const LINE_H = 14;
         const TEXT_PAD = 6;
         ctx.font = '600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif';
         ctx.textBaseline = 'top';
 
         for (let i = 0; i < this.count; i++) {
-            const ey = this.ys[i];
+            const ey = this.ys[i] - sy;
             const eh = this.hs[i];
-            if (ey > lh || ey + eh < 0) continue;
+            if (ey > vpH || ey + eh < 0) continue;
             if (eh < 20) continue;
 
             const ex = this.xs[i];
@@ -433,7 +447,6 @@ class IroncladEngine {
         this.container.addEventListener('mousemove', (e) => {
             const r = this.container.getBoundingClientRect();
             this.mouseX = e.clientX - r.left;
-            // Content-space Y: viewport Y + scroll offset
             this._lastVY = e.clientY - r.top;
             this.mouseY = this._lastVY + this.container.scrollTop;
 
@@ -445,12 +458,17 @@ class IroncladEngine {
             }
         });
 
-        // Scroll changes which content is under the cursor
         this.container.addEventListener('scroll', () => {
-            if (this._lastVY === -9999) return;
-            this.mouseY = this._lastVY + this.container.scrollTop;
-            // Force flashlight update on next tick
-            this.prevMY = -9999;
+            this.scrollY = this.container.scrollTop;
+            // Keep canvas pinned to viewport
+            this.canvas.style.transform = `translateY(${this.scrollY}px)`;
+            this.dirty = true;
+
+            // Update content-space mouse position
+            if (this._lastVY !== -9999) {
+                this.mouseY = this._lastVY + this.scrollY;
+                this.prevMY = -9999; // force flashlight update
+            }
         });
 
         this.container.addEventListener('mousedown', (e) => {
@@ -470,14 +488,13 @@ class IroncladEngine {
             if (this.dragIdx < 0) return;
             const i = this.dragIdx;
 
-            // Snap Y to 15-min grid, relative to header offset
+            // Snap Y to 15-min grid
             const relY = this.ys[i] - CONFIG.TOP_HEADER;
             this.ys[i] = Math.round(relY / SNAP_Y) * SNAP_Y + CONFIG.TOP_HEADER;
 
-            // Clamp Y within the 24h range
-            const minY = CONFIG.TOP_HEADER;
-            const maxY = CONFIG.TOP_HEADER + (HOURS - 1) * CONFIG.HOUR_HEIGHT;
-            this.ys[i] = Math.max(minY, Math.min(this.ys[i], maxY));
+            // Clamp Y within 24h
+            this.ys[i] = Math.max(CONFIG.TOP_HEADER,
+                Math.min(this.ys[i], CONFIG.TOP_HEADER + (HOURS - 1) * CONFIG.HOUR_HEIGHT));
 
             // Snap X to day column
             const col = Math.round((this.xs[i] - CONFIG.LEFT_GUTTER - 10) / CONFIG.DAY_WIDTH);
@@ -493,19 +510,22 @@ class IroncladEngine {
     }
 
     // ── Resize ──────────────────────────────────────────────────────────
-    // Canvas width tracks the viewport, height is always full 24h content.
 
     _resize() {
         const r = this.container.getBoundingClientRect();
-        this.canvas.width = r.width * this.dpr;
-        this.canvas.height = CONTENT_HEIGHT * this.dpr;
-        this.canvas.style.width = r.width + 'px';
-        this.canvas.style.height = CONTENT_HEIGHT + 'px';
+        const w = Math.round(r.width * this.dpr);
+        const h = Math.round(r.height * this.dpr);
+        // Guard: setting canvas dimensions clears the buffer
+        if (this.canvas.width !== w || this.canvas.height !== h) {
+            this.canvas.width = w;
+            this.canvas.height = h;
+            this.canvas.style.width = r.width + 'px';
+            this.canvas.style.height = r.height + 'px';
+        }
         this.dirty = true;
     }
 
     // ── Stats ───────────────────────────────────────────────────────────
-    // Appended to body (not the scroll container) so it stays in place.
 
     _buildStatsPanel() {
         const el = document.createElement('div');
@@ -550,17 +570,15 @@ class IroncladEngine {
         for (let i = 0; i < count; i++) {
             const col = (Math.random() * CONFIG.DAYS) | 0;
 
-            // Weight toward working hours (7-19) but allow full 24h
-            // ~80% of tasks land in 7-19, ~20% outside
+            // 80% work hours (7-19), 20% full 24h
             let hour;
             if (Math.random() < 0.8) {
-                hour = 7 + Math.random() * 12; // 07:00-19:00
+                hour = 7 + Math.random() * 12;
             } else {
-                hour = Math.random() * 24;     // 00:00-24:00
+                hour = Math.random() * 24;
             }
 
-            const dur = 0.25 + Math.random() * 2.75; // 15min — 3h
-            // Clamp so entity doesn't extend past 24:00
+            const dur = 0.25 + Math.random() * 2.75;
             const clampedDur = Math.min(dur, 24 - hour);
 
             this.ids[i]   = i;
@@ -585,10 +603,7 @@ class IroncladEngine {
         this.count = count;
         this._rebuildIndex();
         this.dirty = true;
-
-        // Force flashlight refresh on next frame
         this.prevMX = -9999;
-        // Hide stale proxies
         for (let i = 0; i < this.pool.length; i++) this.pool[i].style.display = 'none';
     }
 }
