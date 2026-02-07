@@ -1,0 +1,112 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    background: #0a0a0e;
+    color: #ccc;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+/* ── Control bar ─────────────────────────────────────────────────────────── */
+
+#controls {
+    background: #13131a;
+    padding: 8px 16px;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    border-bottom: 1px solid #2a2a35;
+    flex-shrink: 0;
+    font-size: 12px;
+    font-family: monospace;
+}
+
+.title {
+    color: #00ffcc;
+    font-weight: 700;
+    font-size: 13px;
+    letter-spacing: 2px;
+    white-space: nowrap;
+}
+
+#controls label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: #888;
+    white-space: nowrap;
+}
+
+#controls output {
+    color: #ddd;
+    min-width: 36px;
+    text-align: right;
+}
+
+#controls input[type="range"] {
+    width: 110px;
+    accent-color: #00ffcc;
+    cursor: pointer;
+}
+
+.btn-group {
+    display: flex;
+    gap: 4px;
+}
+
+.btn-group button {
+    background: #1e1e28;
+    border: 1px solid #333;
+    color: #aaa;
+    padding: 3px 10px;
+    cursor: pointer;
+    font-family: monospace;
+    font-size: 11px;
+    border-radius: 3px;
+    transition: border-color 0.15s;
+}
+
+.btn-group button:hover {
+    border-color: #00ffcc;
+    color: #fff;
+}
+
+.hint {
+    color: #555;
+    font-size: 11px;
+    margin-left: auto;
+    white-space: nowrap;
+}
+
+/* ── Engine container ────────────────────────────────────────────────────── */
+
+#engine-container {
+    flex: 1;
+    background: #0e0e12;
+    min-height: 0;
+}
+
+/* ── Stats overlay (created by engine) ───────────────────────────────────── */
+
+.perf-stats {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    background: rgba(0, 0, 0, 0.85);
+    color: #0f0;
+    padding: 8px 12px;
+    font-family: monospace;
+    font-size: 11px;
+    line-height: 1.7;
+    z-index: 1000;
+    pointer-events: none;
+    border: 1px solid #1a3a1a;
+    border-radius: 4px;
+}
