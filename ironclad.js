@@ -4,14 +4,8 @@
  * Canvas/DOM hybrid renderer for time tracking on software-rendered CloudPCs.
  * No dependencies. No build step.
  *
- * Fixed from multi-model review:
- *  - Frame-stamp dedup for multi-bucket entities
- *  - Pre-allocated candidate arrays (zero hot-path allocation)
- *  - Flat array spatial index (no Map in hot loop)
- *  - Arrow rAF callback (no .bind() per frame)
- *  - Per-frame drag latency (not cumulative)
- *  - textContent stats (no innerHTML churn)
- *  - Grid snap derived from HOUR_HEIGHT, not magic numbers
+ * v0.5.1: 24h scrollable day, canvas is full-height pre-rendered texture.
+ *         Scrolling is free — browser composites from the existing buffer.
  */
 
 // ─── Config ─────────────────────────────────────────────────────────────────
@@ -23,10 +17,10 @@ const CONFIG = {
     DAY_WIDTH: 180,
     HOUR_HEIGHT: 60,
 
-    // Time
+    // Time — full 24h, scrollable
     DAYS: 7,
-    START_HOUR: 8,
-    END_HOUR: 18,
+    START_HOUR: 0,
+    END_HOUR: 24,
 
     // Engine
     FLASHLIGHT_RADIUS: 150,
@@ -37,8 +31,9 @@ const CONFIG = {
 };
 
 const DAY_LABELS = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
-const HOURS = CONFIG.END_HOUR - CONFIG.START_HOUR;
+const HOURS = CONFIG.END_HOUR - CONFIG.START_HOUR; // 24
 const SNAP_Y = CONFIG.HOUR_HEIGHT / 4; // 15-minute grid
+const CONTENT_HEIGHT = CONFIG.TOP_HEADER + HOURS * CONFIG.HOUR_HEIGHT; // 1472px
 
 // Task label fragments — verbose on purpose, text is dead weight we measure
 const LABEL_VERBS = ['Review', 'Update', 'Fix', 'Deploy', 'Test', 'Write', 'Plan', 'Design', 'Debug', 'Refactor'];
@@ -81,7 +76,14 @@ class IroncladEngine {
         if (!el) throw new Error(`#${containerId} not found`);
         this.container = el;
         this.container.style.position = 'relative';
-        this.container.style.overflow = 'hidden';
+        this.container.style.overflowY = 'scroll';
+        this.container.style.overflowX = 'hidden';
+
+        // Spacer div — creates the scrollable height.
+        // Canvas is absolute (doesn't contribute to flow), so we need this.
+        this.spacer = document.createElement('div');
+        this.spacer.style.cssText = `height:${CONTENT_HEIGHT}px;pointer-events:none;`;
+        this.container.appendChild(this.spacer);
 
         // ── SoA entity storage ──
         this.count = 0;
@@ -91,7 +93,7 @@ class IroncladEngine {
         this.ws    = new Float32Array(CONFIG.MAX_ENTITIES);
         this.hs    = new Float32Array(CONFIG.MAX_ENTITIES);
         this.types = new Uint8Array(CONFIG.MAX_ENTITIES);
-        this.labels = new Array(CONFIG.MAX_ENTITIES); // strings can't live in typed arrays
+        this.labels = new Array(CONFIG.MAX_ENTITIES);
 
         // ── Spatial index: array-of-arrays, reused via length reset ──
         this.buckets = new Array(CONFIG.MAX_BUCKETS);
@@ -109,7 +111,7 @@ class IroncladEngine {
         // ── DOM pool ──
         this.pool = [];
 
-        // ── Canvas ──
+        // ── Canvas — full content height, pre-rendered texture ──
         this.dpr = window.devicePixelRatio || 1;
         this.canvas = document.createElement('canvas');
         this.canvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;';
@@ -118,8 +120,11 @@ class IroncladEngine {
         if (!this.ctx) throw new Error('Canvas 2D unavailable');
 
         // ── Input state ──
+        // mouseX/mouseY are in CONTENT space (scroll-adjusted)
+        // _lastVY is viewport-relative Y, for recalculating on scroll
         this.mouseX = -9999;
         this.mouseY = -9999;
+        this._lastVY = -9999;
         this.prevMX = -9999;
         this.prevMY = -9999;
         this.dirty = true;
@@ -137,7 +142,7 @@ class IroncladEngine {
         this.prevTime = 0;
         this.stats = { fps: 0, frameTime: 0, candidates: 0, dragLatency: 0 };
 
-        // ── Stats panel ──
+        // ── Stats panel — on body, not in scroll container ──
         this._buildStatsPanel();
 
         // ── Init ──
@@ -163,6 +168,9 @@ class IroncladEngine {
         this._generate(n);
         this.prevTime = performance.now();
         requestAnimationFrame(this._raf);
+
+        // Scroll to 8am on launch
+        this.container.scrollTop = 8 * CONFIG.HOUR_HEIGHT;
     }
 
     setEntityCount(n) {
@@ -297,6 +305,8 @@ class IroncladEngine {
     }
 
     // ── Canvas render ───────────────────────────────────────────────────
+    // Full 24h pre-rendered. Scrolling is free — browser just composites
+    // a different viewport offset of the existing canvas buffer.
 
     _render() {
         const W = this.canvas.width;
@@ -381,8 +391,6 @@ class IroncladEngine {
         }
 
         // Text pass — separate loop, font set once
-        // Each entity has [title, bullet, bullet, bullet, bullet]
-        // Lines rendered based on available height (~15px per line)
         const LINE_H = 14;
         const TEXT_PAD = 6;
         ctx.font = '600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif';
@@ -399,12 +407,10 @@ class IroncladEngine {
             const lines = this.labels[i];
             let ty = ey + 4;
 
-            // Title (bold weight already set)
             ctx.fillStyle = '#ddd';
             ctx.fillText(lines[0], ex + TEXT_PAD, ty, maxW);
             ty += LINE_H;
 
-            // Bullets — dimmer, normal weight
             if (ty + LINE_H > ey + eh) continue;
             ctx.font = '10px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif';
             ctx.fillStyle = '#888';
@@ -415,7 +421,6 @@ class IroncladEngine {
                 ty += LINE_H;
             }
 
-            // Reset bold for next entity's title
             ctx.font = '600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif';
         }
 
@@ -428,7 +433,9 @@ class IroncladEngine {
         this.container.addEventListener('mousemove', (e) => {
             const r = this.container.getBoundingClientRect();
             this.mouseX = e.clientX - r.left;
-            this.mouseY = e.clientY - r.top;
+            // Content-space Y: viewport Y + scroll offset
+            this._lastVY = e.clientY - r.top;
+            this.mouseY = this._lastVY + this.container.scrollTop;
 
             if (this.dragIdx >= 0) {
                 this.dragInputTime = performance.now();
@@ -436,6 +443,14 @@ class IroncladEngine {
                 this.ys[this.dragIdx] = this.mouseY - this.dragOffY;
                 this.dirty = true;
             }
+        });
+
+        // Scroll changes which content is under the cursor
+        this.container.addEventListener('scroll', () => {
+            if (this._lastVY === -9999) return;
+            this.mouseY = this._lastVY + this.container.scrollTop;
+            // Force flashlight update on next tick
+            this.prevMY = -9999;
         });
 
         this.container.addEventListener('mousedown', (e) => {
@@ -459,6 +474,11 @@ class IroncladEngine {
             const relY = this.ys[i] - CONFIG.TOP_HEADER;
             this.ys[i] = Math.round(relY / SNAP_Y) * SNAP_Y + CONFIG.TOP_HEADER;
 
+            // Clamp Y within the 24h range
+            const minY = CONFIG.TOP_HEADER;
+            const maxY = CONFIG.TOP_HEADER + (HOURS - 1) * CONFIG.HOUR_HEIGHT;
+            this.ys[i] = Math.max(minY, Math.min(this.ys[i], maxY));
+
             // Snap X to day column
             const col = Math.round((this.xs[i] - CONFIG.LEFT_GUTTER - 10) / CONFIG.DAY_WIDTH);
             const clamped = Math.max(0, Math.min(col, CONFIG.DAYS - 1));
@@ -473,22 +493,24 @@ class IroncladEngine {
     }
 
     // ── Resize ──────────────────────────────────────────────────────────
+    // Canvas width tracks the viewport, height is always full 24h content.
 
     _resize() {
         const r = this.container.getBoundingClientRect();
         this.canvas.width = r.width * this.dpr;
-        this.canvas.height = r.height * this.dpr;
+        this.canvas.height = CONTENT_HEIGHT * this.dpr;
         this.canvas.style.width = r.width + 'px';
-        this.canvas.style.height = r.height + 'px';
+        this.canvas.style.height = CONTENT_HEIGHT + 'px';
         this.dirty = true;
     }
 
     // ── Stats ───────────────────────────────────────────────────────────
+    // Appended to body (not the scroll container) so it stays in place.
 
     _buildStatsPanel() {
         const el = document.createElement('div');
         el.className = 'perf-stats';
-        this.container.appendChild(el);
+        document.body.appendChild(el);
 
         this._spans = {};
         for (const k of ['fps', 'frame', 'entities', 'candidates', 'drag']) {
@@ -527,14 +549,25 @@ class IroncladEngine {
 
         for (let i = 0; i < count; i++) {
             const col = (Math.random() * CONFIG.DAYS) | 0;
-            const hour = Math.random() * (HOURS - 1);
+
+            // Weight toward working hours (7-19) but allow full 24h
+            // ~80% of tasks land in 7-19, ~20% outside
+            let hour;
+            if (Math.random() < 0.8) {
+                hour = 7 + Math.random() * 12; // 07:00-19:00
+            } else {
+                hour = Math.random() * 24;     // 00:00-24:00
+            }
+
             const dur = 0.25 + Math.random() * 2.75; // 15min — 3h
+            // Clamp so entity doesn't extend past 24:00
+            const clampedDur = Math.min(dur, 24 - hour);
 
             this.ids[i]   = i;
             this.xs[i]    = gx + col * dw + pad;
             this.ys[i]    = gy + hour * hh;
             this.ws[i]    = dw - pad * 2;
-            this.hs[i]    = dur * hh;
+            this.hs[i]    = clampedDur * hh;
             this.types[i] = (Math.random() * 3) | 0;
 
             const verb = LABEL_VERBS[(Math.random() * LABEL_VERBS.length) | 0];
