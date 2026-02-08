@@ -1,11 +1,11 @@
 /**
- * IRONCLAD ENGINE v0.5.2 — Validation Build
+ * IRONCLAD ENGINE v0.5.3 — Validation Build
  *
  * Canvas/DOM hybrid renderer for time tracking on software-rendered CloudPCs.
  * No dependencies. No build step.
  *
- * Canvas is viewport-sized, re-renders the visible slice on scroll.
- * Y-culling ensures we only draw what's on screen.
+ * Canvas is full content-height (1472px). The browser scrolls it natively.
+ * No re-render on scroll — the baked texture is always correct.
  */
 
 // ─── Config ─────────────────────────────────────────────────────────────────
@@ -110,11 +110,11 @@ class IroncladEngine {
         // ── DOM pool ──
         this.pool = [];
 
-        // ── Canvas — viewport-sized, re-renders visible slice on scroll ──
+        // ── Canvas — full content-height, browser scrolls natively ──
         this.dpr = window.devicePixelRatio || 1;
         this.canvas = document.createElement('canvas');
         this.canvas.style.cssText =
-            'position:absolute;top:0;left:0;pointer-events:none;will-change:transform;';
+            'position:absolute;top:0;left:0;pointer-events:none;';
         this.container.appendChild(this.canvas);
         this.ctx = this.canvas.getContext('2d', { alpha: false });
         if (!this.ctx) throw new Error('Canvas 2D unavailable');
@@ -301,54 +301,41 @@ class IroncladEngine {
     }
 
     // ── Canvas render ───────────────────────────────────────────────────
-    // Viewport-sized canvas. Renders only the visible slice of 24h.
-    // On scroll, the canvas translateY keeps it in the viewport,
-    // and we re-render the visible portion offset by scrollY.
+    // Full content-height canvas. Bakes the entire 24h grid + all entities.
+    // Browser scrolls the canvas natively — zero re-render on scroll.
 
     _render() {
         const W = this.canvas.width;
         const H = this.canvas.height;
         const ctx = this.ctx;
         const dpr = this.dpr;
-        const sy = this.scrollY;
 
         ctx.fillStyle = '#0e0e12';
         ctx.fillRect(0, 0, W, H);
         ctx.save();
         ctx.scale(dpr, dpr);
 
-        const vpW = W / dpr;
-        const vpH = H / dpr;
         const gx = CONFIG.LEFT_GUTTER;
-        const gy = CONFIG.TOP_HEADER - sy; // grid origin offset by scroll
+        const gy = CONFIG.TOP_HEADER;
         const dw = CONFIG.DAY_WIDTH;
         const hh = CONFIG.HOUR_HEIGHT;
         const gridR = gx + CONFIG.DAYS * dw;
 
-        // Day headers — only when scrolled near the top
-        if (gy > -20) {
-            ctx.fillStyle = '#999';
-            ctx.font = '600 11px monospace';
-            ctx.textAlign = 'center';
-            for (let d = 0; d < CONFIG.DAYS; d++) {
-                ctx.fillText(DAY_LABELS[d], gx + d * dw + dw * 0.5, gy - 10);
-            }
+        // Day headers
+        ctx.fillStyle = '#999';
+        ctx.font = '600 11px monospace';
+        ctx.textAlign = 'center';
+        for (let d = 0; d < CONFIG.DAYS; d++) {
+            ctx.fillText(DAY_LABELS[d], gx + d * dw + dw * 0.5, gy - 10);
         }
 
-        // Hour labels + grid lines — only visible ones
+        // Hour labels
         ctx.font = '10px monospace';
         ctx.textAlign = 'right';
-
-        ctx.beginPath();
         for (let h = 0; h <= HOURS; h++) {
-            const y = gy + h * hh;
-            if (y > vpH + hh) break;
-            if (y < -hh) continue;
-
-            // Hour label
             ctx.fillStyle = '#555';
             const label = String(CONFIG.START_HOUR + h).padStart(2, '0') + ':00';
-            ctx.fillText(label, gx - 8, y + 4);
+            ctx.fillText(label, gx - 8, gy + h * hh + 4);
         }
 
         // Hour lines
@@ -357,8 +344,6 @@ class IroncladEngine {
         ctx.beginPath();
         for (let h = 0; h <= HOURS; h++) {
             const y = gy + h * hh + 0.5;
-            if (y > vpH + 1) break;
-            if (y < -1) continue;
             ctx.moveTo(gx, y);
             ctx.lineTo(gridR, y);
         }
@@ -370,53 +355,43 @@ class IroncladEngine {
         for (let h = 0; h < HOURS; h++) {
             for (let q = 1; q < 4; q++) {
                 const y = gy + h * hh + q * SNAP_Y + 0.5;
-                if (y > vpH + 1) break;
-                if (y < -1) continue;
                 ctx.moveTo(gx, y);
                 ctx.lineTo(gridR, y);
             }
         }
         ctx.stroke();
 
-        // Day dividers — full viewport height
-        const gridTop = Math.max(0, gy);
-        const gridBot = Math.min(vpH, gy + HOURS * hh);
-        if (gridBot > gridTop) {
-            ctx.strokeStyle = '#252530';
-            ctx.beginPath();
-            for (let d = 0; d <= CONFIG.DAYS; d++) {
-                const x = gx + d * dw + 0.5;
-                ctx.moveTo(x, gridTop);
-                ctx.lineTo(x, gridBot);
-            }
-            ctx.stroke();
+        // Day dividers
+        ctx.strokeStyle = '#252530';
+        ctx.beginPath();
+        for (let d = 0; d <= CONFIG.DAYS; d++) {
+            const x = gx + d * dw + 0.5;
+            ctx.moveTo(x, gy);
+            ctx.lineTo(x, gy + HOURS * hh);
         }
+        ctx.stroke();
 
-        // Entities — Y-culled against viewport
+        // Entities — full bake, no culling
         for (let i = 0; i < this.count; i++) {
-            const ey = this.ys[i] - sy;
-            if (ey > vpH || ey + this.hs[i] < 0) continue;
-
             const t = this.types[i];
             ctx.fillStyle = TYPE_COLORS[t][0];
-            ctx.fillRect(this.xs[i], ey, this.ws[i], this.hs[i]);
+            ctx.fillRect(this.xs[i], this.ys[i], this.ws[i], this.hs[i]);
             ctx.strokeStyle = TYPE_COLORS[t][1];
-            ctx.strokeRect(this.xs[i], ey, this.ws[i], this.hs[i]);
+            ctx.strokeRect(this.xs[i], this.ys[i], this.ws[i], this.hs[i]);
         }
 
-        // Text pass
+        // Text pass — full bake
         const LINE_H = 14;
         const TEXT_PAD = 6;
         ctx.font = '600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif';
         ctx.textBaseline = 'top';
 
         for (let i = 0; i < this.count; i++) {
-            const ey = this.ys[i] - sy;
             const eh = this.hs[i];
-            if (ey > vpH || ey + eh < 0) continue;
             if (eh < 20) continue;
 
             const ex = this.xs[i];
+            const ey = this.ys[i];
             const maxW = this.ws[i] - TEXT_PAD * 2;
             const lines = this.labels[i];
             let ty = ey + 4;
@@ -460,11 +435,8 @@ class IroncladEngine {
 
         this.container.addEventListener('scroll', () => {
             this.scrollY = this.container.scrollTop;
-            // Keep canvas pinned to viewport
-            this.canvas.style.transform = `translateY(${this.scrollY}px)`;
-            this.dirty = true;
-
-            // Update content-space mouse position
+            // Canvas is full-height — browser scrolls it natively, no re-render needed.
+            // Only update content-space mouse position for flashlight.
             if (this._lastVY !== -9999) {
                 this.mouseY = this._lastVY + this.scrollY;
                 this.prevMY = -9999; // force flashlight update
@@ -514,13 +486,13 @@ class IroncladEngine {
     _resize() {
         const r = this.container.getBoundingClientRect();
         const w = Math.round(r.width * this.dpr);
-        const h = Math.round(r.height * this.dpr);
+        const h = Math.round(CONTENT_HEIGHT * this.dpr);
         // Guard: setting canvas dimensions clears the buffer
         if (this.canvas.width !== w || this.canvas.height !== h) {
             this.canvas.width = w;
             this.canvas.height = h;
             this.canvas.style.width = r.width + 'px';
-            this.canvas.style.height = r.height + 'px';
+            this.canvas.style.height = CONTENT_HEIGHT + 'px';
         }
         this.dirty = true;
     }
