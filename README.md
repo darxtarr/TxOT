@@ -65,7 +65,14 @@ Tested 2025-02-07 on local machine and enterprise CloudPC (VDI, software-rendere
 Plain JS. No TypeScript compilation needed for validation. Will be typed after perf validation passes.
 
 - **SoA** typed arrays for entity data (cache-friendly, zero GC)
+- **SDF flashlight** — edge-distance detection (not center-distance), true circular coverage
 - **Frame-stamp dedup** prevents duplicate processing of multi-bucket entities
 - **Insertion sort** on small candidate sets (faster than Array.sort for N<100)
 - **Pre-allocated buffers** throughout the hot path
 - **textContent** stats updates (no innerHTML reparse)
+- **Merged render loop** — rect + text per entity in single pass (correct z-order for overlaps)
+
+## What's next
+
+Validation is complete. See `CONTEXT.md` for the full product vision (Quake-style panels,
+task lifecycle, staging area, backend integration with ../txxt).

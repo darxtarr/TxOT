@@ -62,53 +62,41 @@ private types: Uint8Array;
 
 ### Key Insights from Multi-Model Review
 
-**From GPT**: 
-- Frame stamp deduplication for multi-bucket entities
+**From GPT**:
+- Frame stamp deduplication for multi-bucket entities ← implemented
 - Camera abstraction for view transforms
-- Lifecycle management (ResizeObserver)
+- Lifecycle management (ResizeObserver — tried, removed: fires spuriously during scroll)
 
 **From Gemini**:
-- Intrusive linked lists for spatial hash (head[] + next[] arrays)
-- "Transient drag layer" - don't rebuild index during drag
-- Zero-allocation philosophy
+- Intrusive linked lists for spatial hash (head[] + next[] arrays) — not yet needed
+- "Transient drag layer" — don't rebuild index during drag ← implemented
+- Zero-allocation philosophy ← implemented (pre-allocated candidate buffers)
 
-**From Sonnet (Me)**:
-- Squared distance checks (no sqrt)
-- Insertion sort for small candidate sets (<100 items)
-- Incremental index updates instead of full rebuilds
-- Delta checks on mouse movement
+**From Sonnet**:
+- Squared distance checks (no sqrt) ← implemented, evolved to SDF edge-distance
+- Insertion sort for small candidate sets (<100 items) ← implemented
+- Incremental index updates instead of full rebuilds — not yet needed
+- Delta checks on mouse movement ← implemented (prevMX/prevMY)
 
-**Critical Corrections**:
-- Center-point indexing is WRONG for wide entities - must span buckets
-- Map<number, Int32Array> in hot loop is slow - use flat arrays
-- Full index rebuild on mouseUp is acceptable for 5k entities (~2-4ms)
+**Critical Corrections (all addressed)**:
+- Center-point indexing is WRONG for wide entities — must span buckets ← fixed
+- Map<number, Int32Array> in hot loop is slow — flat arrays ← fixed
+- Full index rebuild on mouseUp is acceptable for 5k entities (~2-4ms) ← current approach
 
 ## UI Requirements
 
-### View Layout
-- Week view (7 days including weekend for OOH work)
-- 15-minute grid granularity
-- Hour-based Y-axis (08:00 - 18:00 typical work hours)
-- Day-based X-axis columns
+### Calendar View
+- Week view (7 days, vertical day columns for Outlook continuity)
+- 15-minute grid granularity, snap on drop
+- Currently 08:00-18:00 (10h). 24h scroll attempted, reverted — revisit later.
+- Week view collapses to single day during active work; hotkey restores week.
 
 ### Interaction Patterns
-- Drag tasks from backlog/list into calendar slots
-- Resize task duration by dragging edges
-- Snap to 15-minute grid on drop
-- Visual feedback during drag (optimistic UI)
-
-### Data Model (Minimal for PoC)
-```typescript
-interface Task {
-    id: number;
-    x: number;      // World X position (day offset)
-    y: number;      // World Y position (time offset)
-    w: number;      // Width (typically 1 day column - 20px padding)
-    h: number;      // Height (duration in pixels)
-    type: number;   // Task type (0=Task, 1=Event, 2=Milestone)
-    // Future: title, assignee, project, etc.
-}
-```
+- Drag tasks from staging into calendar slots
+- Resize task duration by dragging edges (not yet implemented)
+- Snap to 15-minute grid on drop ← implemented
+- Double-click service → create task pre-scoped to that service
+- Click/mod+click → detail pane slides in
 
 ## Backend Architecture (Future Phase)
 ```
@@ -134,10 +122,10 @@ type ClientCommand =
   | { type: 'resize_task', id: number, w: number, h: number }
 ```
 
-### Backend Tech Stack (Preference)
-- SQLite + Litestream (Boutique choice: simple, fast, S3 backup)
-- WebSocket server in Bun/Deno
-- No CRDT needed - server arbitrates conflicts (last write wins)
+### Backend Tech Stack (Actual — see ../txxt)
+- Rust/axum single binary (serves static files + REST + WebSocket)
+- redb embedded storage (single-file, no external service)
+- No CRDT needed — server arbitrates conflicts (last write wins)
 
 ## Current Implementation: v0.5 (Validation Build)
 
@@ -155,8 +143,9 @@ Single file: `ironclad.js` (no build step, no deps).
 - Arrow rAF callback (no .bind() per frame)
 - textContent stats (no innerHTML churn)
 
-### Known Issue
-- Text labels render at wrong coordinates (position mismatch with entity rects). Under investigation.
+### Fixed Bugs
+- Text labels rendered outside entity rects — `textAlign` was left on `'right'` from hour labels,
+  never reset to `'left'` before entity text pass. One-line fix.
 
 ### Attempted & Reverted
 - 24h scrollable day view (3 attempts, all had scroll issues). Reverted to 10h (8am-6pm).
