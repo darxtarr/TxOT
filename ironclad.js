@@ -250,8 +250,10 @@ class IroncladEngine {
                 if (this.frameStamp[i] === this.currentFrame) continue;
                 this.frameStamp[i] = this.currentFrame;
 
-                const dx = (this.xs[i] + this.ws[i] * 0.5) - this.mouseX;
-                const dy = (this.ys[i] + this.hs[i] * 0.5) - this.mouseY;
+                // SDF: distance from cursor to nearest point on rect edge
+                // 0 when cursor is inside the rect, positive outside
+                const dx = Math.max(this.xs[i] - this.mouseX, this.mouseX - this.xs[i] - this.ws[i], 0);
+                const dy = Math.max(this.ys[i] - this.mouseY, this.mouseY - this.ys[i] - this.hs[i], 0);
                 const dSq = dx * dx + dy * dy;
 
                 if (dSq <= rSq) {
@@ -368,55 +370,54 @@ class IroncladEngine {
         }
         ctx.stroke();
 
-        // Entities — rects first, then text (fewer fillStyle flips)
-        for (let i = 0; i < this.count; i++) {
-            const ey = this.ys[i];
-            if (ey > lh || ey + this.hs[i] < 0) continue;
-
-            const t = this.types[i];
-            ctx.fillStyle = TYPE_COLORS[t][0];
-            ctx.fillRect(this.xs[i], ey, this.ws[i], this.hs[i]);
-            ctx.strokeStyle = TYPE_COLORS[t][1];
-            ctx.strokeRect(this.xs[i], ey, this.ws[i], this.hs[i]);
-        }
-
-        // Text pass — separate loop, font set once
-        // Each entity has [title, bullet, bullet, bullet, bullet]
-        // Lines rendered based on available height (~15px per line)
+        // Entities — rect + text per entity so overlapping z-order is correct
         const LINE_H = 14;
         const TEXT_PAD = 6;
-        ctx.font = '600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif';
+        const TITLE_FONT = '600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif';
+        const BULLET_FONT = '10px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif';
         ctx.textBaseline = 'top';
 
         for (let i = 0; i < this.count; i++) {
+            const ex = this.xs[i];
             const ey = this.ys[i];
+            const ew = this.ws[i];
             const eh = this.hs[i];
             if (ey > lh || ey + eh < 0) continue;
+
+            const t = this.types[i];
+            ctx.fillStyle = TYPE_COLORS[t][0];
+            ctx.fillRect(ex, ey, ew, eh);
+            ctx.strokeStyle = TYPE_COLORS[t][1];
+            ctx.strokeRect(ex, ey, ew, eh);
+
             if (eh < 20) continue;
 
-            const ex = this.xs[i];
-            const maxW = this.ws[i] - TEXT_PAD * 2;
+            // Clip text to entity bounds
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(ex, ey, ew, eh);
+            ctx.clip();
+
             const lines = this.labels[i];
             let ty = ey + 4;
 
-            // Title (bold weight already set)
+            ctx.font = TITLE_FONT;
             ctx.fillStyle = '#ddd';
-            ctx.fillText(lines[0], ex + TEXT_PAD, ty, maxW);
+            ctx.fillText(lines[0], ex + TEXT_PAD, ty);
             ty += LINE_H;
 
-            // Bullets — dimmer, normal weight
-            if (ty + LINE_H > ey + eh) continue;
-            ctx.font = '10px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif';
-            ctx.fillStyle = '#888';
+            if (ty + LINE_H <= ey + eh) {
+                ctx.font = BULLET_FONT;
+                ctx.fillStyle = '#888';
 
-            for (let l = 1; l < 5; l++) {
-                if (ty + LINE_H > ey + eh) break;
-                ctx.fillText('- ' + lines[l], ex + TEXT_PAD, ty, maxW);
-                ty += LINE_H;
+                for (let l = 1; l < 5; l++) {
+                    if (ty + LINE_H > ey + eh) break;
+                    ctx.fillText('- ' + lines[l], ex + TEXT_PAD, ty);
+                    ty += LINE_H;
+                }
             }
 
-            // Reset bold for next entity's title
-            ctx.font = '600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif';
+            ctx.restore();
         }
 
         ctx.restore();
