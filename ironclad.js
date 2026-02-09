@@ -376,6 +376,7 @@ class IroncladEngine {
         const TITLE_FONT = '600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif';
         const BULLET_FONT = '10px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif';
         ctx.textBaseline = 'top';
+        ctx.textAlign = 'left';
 
         for (let i = 0; i < this.count; i++) {
             const ex = this.xs[i];
