@@ -1,11 +1,17 @@
 /**
- * IRONCLAD ENGINE v0.5.3 — Validation Build
+ * IRONCLAD ENGINE v0.5 — Validation Build
  *
  * Canvas/DOM hybrid renderer for time tracking on software-rendered CloudPCs.
  * No dependencies. No build step.
  *
- * Canvas is full content-height (1472px). The browser scrolls it natively.
- * No re-render on scroll — the baked texture is always correct.
+ * Fixed from multi-model review:
+ *  - Frame-stamp dedup for multi-bucket entities
+ *  - Pre-allocated candidate arrays (zero hot-path allocation)
+ *  - Flat array spatial index (no Map in hot loop)
+ *  - Arrow rAF callback (no .bind() per frame)
+ *  - Per-frame drag latency (not cumulative)
+ *  - textContent stats (no innerHTML churn)
+ *  - Grid snap derived from HOUR_HEIGHT, not magic numbers
  */
 
 // ─── Config ─────────────────────────────────────────────────────────────────
@@ -17,10 +23,10 @@ const CONFIG = {
     DAY_WIDTH: 180,
     HOUR_HEIGHT: 60,
 
-    // Time — full 24h, scrollable
+    // Time
     DAYS: 7,
-    START_HOUR: 0,
-    END_HOUR: 24,
+    START_HOUR: 8,
+    END_HOUR: 18,
 
     // Engine
     FLASHLIGHT_RADIUS: 150,
@@ -31,11 +37,10 @@ const CONFIG = {
 };
 
 const DAY_LABELS = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
-const HOURS = CONFIG.END_HOUR - CONFIG.START_HOUR; // 24
+const HOURS = CONFIG.END_HOUR - CONFIG.START_HOUR;
 const SNAP_Y = CONFIG.HOUR_HEIGHT / 4; // 15-minute grid
-const CONTENT_HEIGHT = CONFIG.TOP_HEADER + HOURS * CONFIG.HOUR_HEIGHT; // 1472px
 
-// Task label fragments
+// Task label fragments — verbose on purpose, text is dead weight we measure
 const LABEL_VERBS = ['Review', 'Update', 'Fix', 'Deploy', 'Test', 'Write', 'Plan', 'Design', 'Debug', 'Refactor'];
 const LABEL_NOUNS = ['API docs', 'homepage', 'auth flow', 'dashboard', 'CI pipeline', 'database', 'UI tests', 'sprint plan', 'onboarding', 'backlog'];
 const LABEL_REASONS = [
@@ -76,13 +81,7 @@ class IroncladEngine {
         if (!el) throw new Error(`#${containerId} not found`);
         this.container = el;
         this.container.style.position = 'relative';
-        this.container.style.overflowY = 'scroll';
-        this.container.style.overflowX = 'hidden';
-
-        // Spacer — in normal flow, creates the scrollable height.
-        this.spacer = document.createElement('div');
-        this.spacer.style.cssText = `height:${CONTENT_HEIGHT}px;pointer-events:none;`;
-        this.container.appendChild(this.spacer);
+        this.container.style.overflow = 'hidden';
 
         // ── SoA entity storage ──
         this.count = 0;
@@ -92,17 +91,17 @@ class IroncladEngine {
         this.ws    = new Float32Array(CONFIG.MAX_ENTITIES);
         this.hs    = new Float32Array(CONFIG.MAX_ENTITIES);
         this.types = new Uint8Array(CONFIG.MAX_ENTITIES);
-        this.labels = new Array(CONFIG.MAX_ENTITIES);
+        this.labels = new Array(CONFIG.MAX_ENTITIES); // strings can't live in typed arrays
 
-        // ── Spatial index ──
+        // ── Spatial index: array-of-arrays, reused via length reset ──
         this.buckets = new Array(CONFIG.MAX_BUCKETS);
         for (let i = 0; i < CONFIG.MAX_BUCKETS; i++) this.buckets[i] = [];
 
-        // ── Frame-stamp dedup ──
+        // ── Frame-stamp dedup (entities spanning multiple buckets) ──
         this.frameStamp = new Uint32Array(CONFIG.MAX_ENTITIES);
         this.currentFrame = 0;
 
-        // ── Pre-allocated candidate buffers ──
+        // ── Pre-allocated candidate buffers (zero alloc in hot path) ──
         this.candidateIdx  = new Int32Array(CONFIG.MAX_ENTITIES);
         this.candidateDist = new Float64Array(CONFIG.MAX_ENTITIES);
         this.candidateCount = 0;
@@ -110,23 +109,17 @@ class IroncladEngine {
         // ── DOM pool ──
         this.pool = [];
 
-        // ── Canvas — full content-height, browser scrolls natively ──
+        // ── Canvas ──
         this.dpr = window.devicePixelRatio || 1;
         this.canvas = document.createElement('canvas');
-        this.canvas.style.cssText =
-            'position:absolute;top:0;left:0;pointer-events:none;';
+        this.canvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;';
         this.container.appendChild(this.canvas);
         this.ctx = this.canvas.getContext('2d', { alpha: false });
         if (!this.ctx) throw new Error('Canvas 2D unavailable');
 
-        // ── Scroll state ──
-        this.scrollY = 0;
-
         // ── Input state ──
-        // mouseX/mouseY are CONTENT-space (scroll-adjusted)
         this.mouseX = -9999;
         this.mouseY = -9999;
-        this._lastVY = -9999; // viewport-relative Y, for scroll recalc
         this.prevMX = -9999;
         this.prevMY = -9999;
         this.dirty = true;
@@ -144,7 +137,7 @@ class IroncladEngine {
         this.prevTime = 0;
         this.stats = { fps: 0, frameTime: 0, candidates: 0, dragLatency: 0 };
 
-        // ── Stats panel (on body, not in scroll container) ──
+        // ── Stats panel ──
         this._buildStatsPanel();
 
         // ── Init ──
@@ -152,11 +145,15 @@ class IroncladEngine {
         this._bindInput();
         this._resize();
 
+        // Arrow function — bound once, reused every frame
         this._raf = (now) => {
             this._tick(now);
             requestAnimationFrame(this._raf);
         };
 
+        if (typeof ResizeObserver !== 'undefined') {
+            new ResizeObserver(() => this._resize()).observe(this.container);
+        }
         window.addEventListener('resize', () => this._resize());
     }
 
@@ -166,8 +163,6 @@ class IroncladEngine {
         this._generate(n);
         this.prevTime = performance.now();
         requestAnimationFrame(this._raf);
-        // Scroll to 8am
-        this.container.scrollTop = 8 * CONFIG.HOUR_HEIGHT;
     }
 
     setEntityCount(n) {
@@ -198,6 +193,7 @@ class IroncladEngine {
 
     _rebuildIndex() {
         for (let b = 0; b < CONFIG.MAX_BUCKETS; b++) this.buckets[b].length = 0;
+
         for (let i = 0; i < this.count; i++) {
             const b0 = (this.xs[i] / CONFIG.BUCKET_WIDTH) | 0;
             const b1 = ((this.xs[i] + this.ws[i]) / CONFIG.BUCKET_WIDTH) | 0;
@@ -301,8 +297,6 @@ class IroncladEngine {
     }
 
     // ── Canvas render ───────────────────────────────────────────────────
-    // Full content-height canvas. Bakes the entire 24h grid + all entities.
-    // Browser scrolls the canvas natively — zero re-render on scroll.
 
     _render() {
         const W = this.canvas.width;
@@ -315,11 +309,14 @@ class IroncladEngine {
         ctx.save();
         ctx.scale(dpr, dpr);
 
+        const lw = W / dpr;
+        const lh = H / dpr;
         const gx = CONFIG.LEFT_GUTTER;
         const gy = CONFIG.TOP_HEADER;
         const dw = CONFIG.DAY_WIDTH;
         const hh = CONFIG.HOUR_HEIGHT;
         const gridR = gx + CONFIG.DAYS * dw;
+        const gridB = gy + HOURS * hh;
 
         // Day headers
         ctx.fillStyle = '#999';
@@ -330,15 +327,15 @@ class IroncladEngine {
         }
 
         // Hour labels
+        ctx.fillStyle = '#555';
         ctx.font = '10px monospace';
         ctx.textAlign = 'right';
         for (let h = 0; h <= HOURS; h++) {
-            ctx.fillStyle = '#555';
             const label = String(CONFIG.START_HOUR + h).padStart(2, '0') + ':00';
             ctx.fillText(label, gx - 8, gy + h * hh + 4);
         }
 
-        // Hour lines
+        // Hour grid lines
         ctx.strokeStyle = '#252530';
         ctx.lineWidth = 1;
         ctx.beginPath();
@@ -367,39 +364,47 @@ class IroncladEngine {
         for (let d = 0; d <= CONFIG.DAYS; d++) {
             const x = gx + d * dw + 0.5;
             ctx.moveTo(x, gy);
-            ctx.lineTo(x, gy + HOURS * hh);
+            ctx.lineTo(x, gridB);
         }
         ctx.stroke();
 
-        // Entities — full bake, no culling
+        // Entities — rects first, then text (fewer fillStyle flips)
         for (let i = 0; i < this.count; i++) {
+            const ey = this.ys[i];
+            if (ey > lh || ey + this.hs[i] < 0) continue;
+
             const t = this.types[i];
             ctx.fillStyle = TYPE_COLORS[t][0];
-            ctx.fillRect(this.xs[i], this.ys[i], this.ws[i], this.hs[i]);
+            ctx.fillRect(this.xs[i], ey, this.ws[i], this.hs[i]);
             ctx.strokeStyle = TYPE_COLORS[t][1];
-            ctx.strokeRect(this.xs[i], this.ys[i], this.ws[i], this.hs[i]);
+            ctx.strokeRect(this.xs[i], ey, this.ws[i], this.hs[i]);
         }
 
-        // Text pass — full bake
+        // Text pass — separate loop, font set once
+        // Each entity has [title, bullet, bullet, bullet, bullet]
+        // Lines rendered based on available height (~15px per line)
         const LINE_H = 14;
         const TEXT_PAD = 6;
         ctx.font = '600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif';
         ctx.textBaseline = 'top';
 
         for (let i = 0; i < this.count; i++) {
+            const ey = this.ys[i];
             const eh = this.hs[i];
+            if (ey > lh || ey + eh < 0) continue;
             if (eh < 20) continue;
 
             const ex = this.xs[i];
-            const ey = this.ys[i];
             const maxW = this.ws[i] - TEXT_PAD * 2;
             const lines = this.labels[i];
             let ty = ey + 4;
 
+            // Title (bold weight already set)
             ctx.fillStyle = '#ddd';
             ctx.fillText(lines[0], ex + TEXT_PAD, ty, maxW);
             ty += LINE_H;
 
+            // Bullets — dimmer, normal weight
             if (ty + LINE_H > ey + eh) continue;
             ctx.font = '10px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif';
             ctx.fillStyle = '#888';
@@ -410,6 +415,7 @@ class IroncladEngine {
                 ty += LINE_H;
             }
 
+            // Reset bold for next entity's title
             ctx.font = '600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif';
         }
 
@@ -422,24 +428,13 @@ class IroncladEngine {
         this.container.addEventListener('mousemove', (e) => {
             const r = this.container.getBoundingClientRect();
             this.mouseX = e.clientX - r.left;
-            this._lastVY = e.clientY - r.top;
-            this.mouseY = this._lastVY + this.container.scrollTop;
+            this.mouseY = e.clientY - r.top;
 
             if (this.dragIdx >= 0) {
                 this.dragInputTime = performance.now();
                 this.xs[this.dragIdx] = this.mouseX - this.dragOffX;
                 this.ys[this.dragIdx] = this.mouseY - this.dragOffY;
                 this.dirty = true;
-            }
-        });
-
-        this.container.addEventListener('scroll', () => {
-            this.scrollY = this.container.scrollTop;
-            // Canvas is full-height — browser scrolls it natively, no re-render needed.
-            // Only update content-space mouse position for flashlight.
-            if (this._lastVY !== -9999) {
-                this.mouseY = this._lastVY + this.scrollY;
-                this.prevMY = -9999; // force flashlight update
             }
         });
 
@@ -460,13 +455,9 @@ class IroncladEngine {
             if (this.dragIdx < 0) return;
             const i = this.dragIdx;
 
-            // Snap Y to 15-min grid
+            // Snap Y to 15-min grid, relative to header offset
             const relY = this.ys[i] - CONFIG.TOP_HEADER;
             this.ys[i] = Math.round(relY / SNAP_Y) * SNAP_Y + CONFIG.TOP_HEADER;
-
-            // Clamp Y within 24h
-            this.ys[i] = Math.max(CONFIG.TOP_HEADER,
-                Math.min(this.ys[i], CONFIG.TOP_HEADER + (HOURS - 1) * CONFIG.HOUR_HEIGHT));
 
             // Snap X to day column
             const col = Math.round((this.xs[i] - CONFIG.LEFT_GUTTER - 10) / CONFIG.DAY_WIDTH);
@@ -485,15 +476,10 @@ class IroncladEngine {
 
     _resize() {
         const r = this.container.getBoundingClientRect();
-        const w = Math.round(r.width * this.dpr);
-        const h = Math.round(CONTENT_HEIGHT * this.dpr);
-        // Guard: setting canvas dimensions clears the buffer
-        if (this.canvas.width !== w || this.canvas.height !== h) {
-            this.canvas.width = w;
-            this.canvas.height = h;
-            this.canvas.style.width = r.width + 'px';
-            this.canvas.style.height = CONTENT_HEIGHT + 'px';
-        }
+        this.canvas.width = r.width * this.dpr;
+        this.canvas.height = r.height * this.dpr;
+        this.canvas.style.width = r.width + 'px';
+        this.canvas.style.height = r.height + 'px';
         this.dirty = true;
     }
 
@@ -502,7 +488,7 @@ class IroncladEngine {
     _buildStatsPanel() {
         const el = document.createElement('div');
         el.className = 'perf-stats';
-        document.body.appendChild(el);
+        this.container.appendChild(el);
 
         this._spans = {};
         for (const k of ['fps', 'frame', 'entities', 'candidates', 'drag']) {
@@ -541,23 +527,14 @@ class IroncladEngine {
 
         for (let i = 0; i < count; i++) {
             const col = (Math.random() * CONFIG.DAYS) | 0;
-
-            // 80% work hours (7-19), 20% full 24h
-            let hour;
-            if (Math.random() < 0.8) {
-                hour = 7 + Math.random() * 12;
-            } else {
-                hour = Math.random() * 24;
-            }
-
-            const dur = 0.25 + Math.random() * 2.75;
-            const clampedDur = Math.min(dur, 24 - hour);
+            const hour = Math.random() * (HOURS - 1);
+            const dur = 0.25 + Math.random() * 2.75; // 15min — 3h
 
             this.ids[i]   = i;
             this.xs[i]    = gx + col * dw + pad;
             this.ys[i]    = gy + hour * hh;
             this.ws[i]    = dw - pad * 2;
-            this.hs[i]    = clampedDur * hh;
+            this.hs[i]    = dur * hh;
             this.types[i] = (Math.random() * 3) | 0;
 
             const verb = LABEL_VERBS[(Math.random() * LABEL_VERBS.length) | 0];
@@ -575,7 +552,10 @@ class IroncladEngine {
         this.count = count;
         this._rebuildIndex();
         this.dirty = true;
+
+        // Force flashlight refresh on next frame
         this.prevMX = -9999;
+        // Hide stale proxies
         for (let i = 0; i < this.pool.length; i++) this.pool[i].style.display = 'none';
     }
 }
